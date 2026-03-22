@@ -5,7 +5,9 @@ import asyncio
 from dotenv import load_dotenv
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import CommandStart, Command
+from aiogram.filters import CommandStart, Command, StateFilter
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.types import WebAppInfo
 
@@ -18,6 +20,16 @@ ADMIN_IDS = (os.getenv("ADMIN_IDS") or "").split(",")
 DB_PATH = os.path.abspath(DATABASE)
 
 logging.basicConfig(level=logging.INFO)
+class UserStates(StatesGroup):
+    entering_promo = State()
+
+# --- Admin States ---
+class AdminStates(StatesGroup):
+    waiting_for_broadcast_text = State()
+    waiting_for_balance_user_id = State()
+    waiting_for_balance_amount = State()
+    waiting_for_user_info_id = State()
+
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
@@ -227,11 +239,53 @@ async def cb_check_sub(callback: types.CallbackQuery):
         await callback.answer("❌ Siz hali ham kanalga a'zo emassiz!", show_alert=True)
 
 @dp.callback_query(F.data == "enter_promo")
-async def cb_promo(callback: types.CallbackQuery):
+async def cb_promo(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
-    await callback.message.answer("🎁 Promo kodni yuboring:")
+    await callback.message.answer("🎁 Promo kodni yuboring (yoki /cancel):")
+    await state.set_state(UserStates.entering_promo)
 
-# --- Admin Commands ---
+# --- Promo Handling ---
+@dp.message(UserStates.entering_promo)
+async def promo_handler(message: types.Message, state: FSMContext):
+    if message.text == "/cancel":
+        await state.clear()
+        await message.answer("❌ Bekor qilindi.")
+        return
+        
+    code = message.text.strip()
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM promo_codes WHERE code = ?", (code,))
+    promo = cursor.fetchone()
+    
+    if not promo:
+        await message.answer("❌ Bunday promo kod mavjud emas.")
+        conn.close()
+        return
+        
+    if promo['current_uses'] >= promo['max_uses']:
+        await message.answer("❌ Bu promo kodning ishlatilish soni tugagan.")
+        conn.close()
+        await state.clear()
+        return
+        
+    cursor.execute("SELECT * FROM promo_usage WHERE user_id = ? AND promo_id = ?", (str(message.from_user.id), promo['id']))
+    if cursor.fetchone():
+        await message.answer("❌ Siz bu promo kodni allaqachon ishlatgansiz.")
+        conn.close()
+        await state.clear()
+        return
+        
+    # All checks passed, reward the user
+    reward = promo['reward']
+    cursor.execute("UPDATE users SET stars_balance = stars_balance + ? WHERE id = ?", (reward, str(message.from_user.id)))
+    cursor.execute("UPDATE promo_codes SET current_uses = current_uses + 1 WHERE id = ?", (promo['id'],))
+    cursor.execute("INSERT INTO promo_usage (user_id, promo_id) VALUES (?, ?)", (str(message.from_user.id), promo['id']))
+    conn.commit()
+    conn.close()
+    
+    await message.answer(f"✅ Tabriklaymiz! Hisobingizga {reward} Stars 💎 qo'shildi.")
+    await state.clear()
 @dp.message(Command("admin"))
 async def admin_panel(message: types.Message):
     if not is_admin(message.from_user.id):
@@ -254,26 +308,35 @@ async def admin_panel(message: types.Message):
         "<b>👨‍💻 Admin Paneli</b>\n\n"
         f"👥 Jami foydalanuvchilar: <b>{total_users}</b>\n"
         f"💎 Jami sotilgan Stars: <b>{total_stars_val}</b>\n"
-        f"🎁 Faol promo kodlar: <b>{total_promos}</b>\n\n"
-        "<b>Buyruqlar:</b>\n"
-        "📣 /broadcast [xabar] - Hammuaga jo'natish\n"
-        "💰 /addbalance [id] [summa] - Balans qo'shish\n"
-        "👤 /user [id] - Foydalanuvchi ma'lumoti"
+        f"🎁 Faol promo kodlar: <b>{total_promos}</b>\n"
     )
-    await message.answer(text, parse_mode="HTML")
-
-@dp.message(Command("broadcast"))
-async def admin_broadcast(message: types.Message):
-    if not is_admin(message.from_user.id):
-        await message.answer("❌ Sizda ushbu komanda uchun ruxsat yo'q.")
-        return
     
-    msg_parts = message.text.split(maxsplit=1)
-    if len(msg_parts) < 2:
-        await message.answer("❌ Xabar matnini kiriting: `/broadcast Salom hammuaga` (Markdown emas, shunchaki matn)", parse_mode="Markdown")
-        return
-    msg_text = msg_parts[1]
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📣 Xabar yuborish", callback_data="admin_broadcast")
+    kb.button(text="💰 Balans qo'shish", callback_data="admin_add_balance")
+    kb.button(text="👤 Foydalanuvchi ma'lumoti", callback_data="admin_user_info")
+    kb.button(text="🎁 Promo kod yaratish", callback_data="admin_create_promo")
+    kb.adjust(2)
+    
+    await message.answer(text, reply_markup=kb.as_markup(), parse_mode="HTML")
 
+# --- Admin Callback Handlers & FSM ---
+
+@dp.callback_query(F.data == "admin_broadcast")
+async def cb_admin_broadcast(callback: types.CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id): return
+    await callback.message.answer("📣 Hammuaga yuboriladigan xabar matnini yuboring (yoki /cancel):")
+    await state.set_state(AdminStates.waiting_for_broadcast_text)
+    await callback.answer()
+
+@dp.message(AdminStates.waiting_for_broadcast_text)
+async def process_broadcast(message: types.Message, state: FSMContext):
+    if message.text == "/cancel":
+        await state.clear()
+        await message.answer("❌ Bekor qilindi.")
+        return
+        
+    msg_text = message.text
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute("SELECT id FROM users")
@@ -281,29 +344,41 @@ async def admin_broadcast(message: types.Message):
     conn.close()
 
     count = 0
-    await message.answer(f"⏳ {len(users)} ta foydalanuvchiga yuborish boshlandi...")
+    progress = await message.answer(f"⏳ {len(users)} ta foydalanuvchiga yuborish boshlandi...")
     
     for user in users:
         try:
             await bot.send_message(user['id'], msg_text)
             count += 1
-            await asyncio.sleep(0.05) # Avoid flood
+            await asyncio.sleep(0.05)
         except: pass
-    
-    await message.answer(f"✅ Xabar {count} ta foydalanuvchiga muvaffaqiyatli yuborildi.")
-
-@dp.message(Command("addbalance"))
-async def admin_add_balance(message: types.Message):
-    if not is_admin(message.from_user.id):
-        await message.answer("❌ Sizda ushbu komanda uchun ruxsat yo'q.")
-        return
-    
-    args = message.text.split()
-    if len(args) < 3:
-        await message.answer("❌ Format: `/addbalance [user_id] [amount]`", parse_mode="Markdown")
-        return
         
-    target_id, amount = args[1], args[2]
+    await progress.edit_text(f"✅ Xabar {count} ta foydalanuvchiga muvaffaqiyatli yuborildi.")
+    await state.clear()
+
+@dp.callback_query(F.data == "admin_add_balance")
+async def cb_admin_balance(callback: types.CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id): return
+    await callback.message.answer("💰 Foydalanuvchi ID sini yuboring (yoki /cancel):")
+    await state.set_state(AdminStates.waiting_for_balance_user_id)
+    await callback.answer()
+
+@dp.message(AdminStates.waiting_for_balance_user_id)
+async def process_balance_id(message: types.Message, state: FSMContext):
+    if message.text == "/cancel":
+        await state.clear()
+        await message.answer("❌ Bekor qilindi.")
+        return
+    await state.update_data(target_user_id=message.text.strip())
+    await message.answer("💵 Qancha summa qo'shmoqchisiz (so'mda)?")
+    await state.set_state(AdminStates.waiting_for_balance_amount)
+
+@dp.message(AdminStates.waiting_for_balance_amount)
+async def process_balance_amount(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    target_id = data['target_user_id']
+    amount = message.text.strip()
+    
     try:
         conn = get_db()
         cursor = conn.cursor()
@@ -319,19 +394,18 @@ async def admin_add_balance(message: types.Message):
         conn.close()
     except Exception as e:
         await message.answer(f"❌ Xatolik: {e}")
+    await state.clear()
 
-@dp.message(Command("user"))
-async def admin_user_info(message: types.Message):
-    if not is_admin(message.from_user.id):
-        await message.answer("❌ Sizda ushbu komanda uchun ruxsat yo'q.")
-        return
-    
-    args = message.text.split()
-    if len(args) < 2:
-        await message.answer("❌ Format: `/user [user_id]`", parse_mode="Markdown")
-        return
-        
-    target_id = args[1]
+@dp.callback_query(F.data == "admin_user_info")
+async def cb_admin_user(callback: types.CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id): return
+    await callback.message.answer("👤 Ma'lumot kerak bo'lgan foydalanuvchi ID sini yuboring:")
+    await state.set_state(AdminStates.waiting_for_user_info_id)
+    await callback.answer()
+
+@dp.message(AdminStates.waiting_for_user_info_id)
+async def process_user_info(message: types.Message, state: FSMContext):
+    target_id = message.text.strip()
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM users WHERE id = ?", (target_id,))
@@ -350,42 +424,12 @@ async def admin_user_info(message: types.Message):
         await message.answer(text, parse_mode="HTML")
     else:
         await message.answer("❌ Foydalanuvchi topilmadi.")
+    await state.clear()
 
-# --- Promo Handling ---
-    # If the user sends a potential promo code (not a command)
-    if message.text and not message.text.startswith('/'):
-        code = message.text.strip()
-        # Proxy to the local API or handle directly via DB
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM promo_codes WHERE code = ?", (code,))
-        promo = cursor.fetchone()
-        
-        if not promo:
-            await message.answer("❌ Bunday promo kod mavjud emas.")
-            conn.close()
-            return
-            
-        if promo['current_uses'] >= promo['max_uses']:
-            await message.answer("❌ Bu promo kodning ishlatilish soni tugagan.")
-            conn.close()
-            return
-            
-        cursor.execute("SELECT * FROM promo_usage WHERE user_id = ? AND promo_id = ?", (str(message.from_user.id), promo['id']))
-        if cursor.fetchone():
-            await message.answer("❌ Siz bu promo kodni allaqachon ishlatgansiz.")
-            conn.close()
-            return
-            
-        # All checks passed, reward the user
-        reward = promo['reward']
-        cursor.execute("UPDATE users SET stars_balance = stars_balance + ? WHERE id = ?", (reward, str(message.from_user.id)))
-        cursor.execute("UPDATE promo_codes SET current_uses = current_uses + 1 WHERE id = ?", (promo['id'],))
-        cursor.execute("INSERT INTO promo_usage (user_id, promo_id) VALUES (?, ?)", (str(message.from_user.id), promo['id']))
-        conn.commit()
-        conn.close()
-        
-        await message.answer(f"✅ Tabriklaymiz! Hisobingizga {reward} Stars 💎 qo'shildi.")
+@dp.message(Command("cancel"))
+async def cancel_handler(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer("❌ Amallar bekor qilindi.", reply_markup=types.ReplyKeyboardRemove())
 
 async def main():
     setup_db()
