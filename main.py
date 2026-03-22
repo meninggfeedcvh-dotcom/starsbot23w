@@ -29,6 +29,10 @@ class AdminStates(StatesGroup):
     waiting_for_balance_user_id = State()
     waiting_for_balance_amount = State()
     waiting_for_user_info_id = State()
+    # Promo Creation
+    waiting_for_promo_code = State()
+    waiting_for_promo_reward = State()
+    waiting_for_promo_limit = State()
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -316,6 +320,7 @@ async def admin_panel(message: types.Message):
     kb.button(text="💰 Balans qo'shish", callback_data="admin_add_balance")
     kb.button(text="👤 Foydalanuvchi ma'lumoti", callback_data="admin_user_info")
     kb.button(text="🎁 Promo kod yaratish", callback_data="admin_create_promo")
+    kb.button(text="📜 Promo kodlar ro'yxat", callback_data="admin_list_promos")
     kb.adjust(2)
     
     await message.answer(text, reply_markup=kb.as_markup(), parse_mode="HTML")
@@ -417,14 +422,30 @@ async def process_user_info(message: types.Message, state: FSMContext):
             f"👤 <b>Foydalanuvchi:</b> @{user['username']}\n"
             f"🆔 ID: <code>{user['id']}</code>\n"
             f"💰 Balans: {user['balance']} so'm\n"
-            f"💎 Stars Balans: {user['stars_balance']}\n"
-            f"📦 Buyurtmalar: {user['total_orders']}\n"
-            f"📅 Qo'shilgan: {user['joined_at']}"
-        )
-        await message.answer(text, parse_mode="HTML")
-    else:
-        await message.answer("❌ Foydalanuvchi topilmadi.")
+    
     await state.clear()
+
+@dp.callback_query(F.data == "admin_list_promos")
+async def cb_list_promos(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id): return
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM promo_codes ORDER BY id DESC LIMIT 20")
+    promos = cursor.fetchall()
+    conn.close()
+    
+    if not promos:
+        await callback.message.answer("📭 Hozircha promo kodlar yo'q.")
+        await callback.answer()
+        return
+        
+    text = "<b>📜 Oxirgi 20 ta promo kod:</b>\n\n"
+    for p in promos:
+        text += f"🎫 <code>{p['code']}</code> | 💎 {p['reward']} | 🔢 {p['current_uses']}/{p['max_uses']}\n"
+    
+    await callback.message.answer(text, parse_mode="HTML")
+    await callback.answer()
 
 @dp.message(Command("cancel"))
 async def cancel_handler(message: types.Message, state: FSMContext):
