@@ -48,6 +48,8 @@ def is_admin(user_id: int):
 def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
     return conn
 
 def setup_db():
@@ -377,7 +379,7 @@ async def msg_balance(message: types.Message):
         f"💵 Asosiy Hisob: <b>{balance} so'm</b>\n"
         f"💎 Stars Balansi: <b>{stars}</b>\n\n"
         f"💳 <b>Hisobni to'ldirish:</b>\n"
-        f"Karta: <code>6262 5702 9537 1109</code>\n\n"
+        f"Karta: <code>6262 5702 0537 1009</code>\n\n"
         f"❗️ To'lovdan so'ng chekni @devc0derweb ga yuboring."
     )
     await message.answer(text, parse_mode="HTML")
@@ -518,7 +520,7 @@ async def process_broadcast(message: types.Message, state: FSMContext):
     for user in users:
         try:
             await bot.send_message(user['id'], msg_text)
-            count += 1
+            count = count + 1
             await asyncio.sleep(0.05)
         except: pass
         
