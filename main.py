@@ -19,9 +19,12 @@ DATABASE = "database.db" # Local to the bot directory
 ADMIN_IDS = (os.getenv("ADMIN_IDS") or "").split(",") 
 DB_PATH = os.path.abspath(DATABASE)
 
-logging.basicConfig(level=logging.INFO)
 class UserStates(StatesGroup):
     entering_promo = State()
+
+# --- Cache ---
+subscription_cache = {} # {user_id: (status, timestamp)}
+CACHE_EXPIRY = 300 # 5 minutes
 
 # --- Admin States ---
 class AdminStates(StatesGroup):
@@ -111,11 +114,20 @@ async def check_subscription(user_id: int):
     # Admins bypass the check
     if is_admin(user_id):
         return True
-        
+    
+    # Check Cache
+    now = datetime.now().timestamp()
+    if user_id in subscription_cache:
+        status, ts = subscription_cache[user_id]
+        if now - ts < CACHE_EXPIRY:
+            return status
+
     try:
         member = await bot.get_chat_member(chat_id=REQUIRED_CHANNEL, user_id=user_id)
-        if member.status in ["member", "administrator", "creator"]:
-            return True
+        is_subbed = member.status in ["member", "administrator", "creator"]
+        # Update Cache
+        subscription_cache[user_id] = (is_subbed, now)
+        return is_subbed
     except Exception as e:
         logging.error(f"Subscription check error: {e}")
     return False
@@ -139,7 +151,7 @@ def get_admin_back_kb():
 
 def get_main_menu_kb(user_id):
     kb = ReplyKeyboardBuilder()
-    kb.button(text="🛍️ Onlayn do'kon", web_app=WebAppInfo(url=f"https://buyurtma-production.up.railway.app/?user_id={user_id}"))
+    kb.button(text="🛍️ Onlayn do'kon", web_app=WebAppInfo(url=f"https://ishla-production.up.railway.app/?user_id={user_id}"))
     kb.button(text="📦 Xizmatlar")
     kb.button(text="📊 Buyurtmalarim")
     kb.button(text="💳 Hisobim")
@@ -149,6 +161,15 @@ def get_main_menu_kb(user_id):
     kb.button(text="☎️ Qo'llab-quvvatlash")
     kb.adjust(2)
     return kb.as_markup(resize_keyboard=True)
+
+async def show_main_menu(message: types.Message, user_id: str):
+    await message.answer(
+        f"<b>Salom {message.from_user.full_name}!</b> 👋\n\n"
+        "✨ <b>STARS BAZA</b> botiga xush kelibsiz!\n\n"
+        "Pastdagi menyu orqali xizmatlardan foydalanishingiz mumkin.",
+        reply_markup=get_main_menu_kb(user_id),
+        parse_mode="HTML"
+    )
 
 # --- Handlers ---
 @dp.message(CommandStart())
@@ -203,6 +224,13 @@ async def start_cmd(message: types.Message):
                     cursor.execute("UPDATE users SET stars_balance = stars_balance + ? WHERE id = ?", (reward, user_id))
                     cursor.execute("UPDATE promo_codes SET current_uses = current_uses + 1 WHERE id = ?", (promo['id'],))
                     cursor.execute("INSERT INTO promo_usage (user_id, promo_id) VALUES (?, ?)", (user_id, promo['id']))
+                    
+                    # Add to orders/history (new)
+                    cursor.execute(
+                        "INSERT INTO orders (user_id, amount, status) VALUES (?, ?, 'Accepted')",
+                        (user_id, f"+{reward} Stars (Auto-Promo)")
+                    )
+                    
                     conn.commit()
                     await message.answer(f"🎁 <b>Tabriklaymiz!</b>\n\nHavola orqali kelganingiz uchun <b>{reward} Stars</b> 💎 balansigizga qo'shildi!", parse_mode="HTML")
                 else:
@@ -220,13 +248,7 @@ async def start_cmd(message: types.Message):
         )
         return
 
-    await message.answer(
-        f"<b>Salom {message.from_user.full_name}!</b> 👋\n\n"
-        "✨ <b>STARS BAZA</b> botiga xush kelibsiz!\n\n"
-        "Pastdagi menyu orqali xizmatlardan foydalanishingiz mumkin.",
-        reply_markup=get_main_menu_kb(user_id),
-        parse_mode="HTML"
-    )
+    await show_main_menu(message, user_id)
 
 @dp.message(F.text == "💳 Hisobim")
 async def msg_check_balance(message: types.Message):
@@ -273,11 +295,15 @@ async def msg_enter_promo(message: types.Message, state: FSMContext):
 
 @dp.message(F.text == "☎️ Qo'llab-quvvatlash")
 async def msg_support(message: types.Message):
-    await message.answer("👨‍💻 Qo'llab-quvvatlash: @devel0per_junior\nSavollaringiz bo'lsa yozing!")
+    await message.answer("🆘 Savollaringiz bormi? Admin bilan bog'laning:\n\n👤 Admin: @devc0derweb")
 
 @dp.message(F.text == "📦 Xizmatlar")
 async def msg_services(message: types.Message):
-    await message.answer("📦 Xizmatlar tez kunda qo'shiladi!")
+    kb = InlineKeyboardBuilder()
+    kb.button(text="💎 Stars olish", web_app=WebAppInfo(url=f"https://ishla-production.up.railway.app/?tab=stars&user_id={message.from_user.id}"))
+    kb.button(text="👑 Premium olish", web_app=WebAppInfo(url=f"https://ishla-production.up.railway.app/?tab=premium&user_id={message.from_user.id}"))
+    kb.adjust(1)
+    await message.answer("📦 Kerakli xizmatni tanlang:", reply_markup=kb.as_markup())
 
 @dp.message(F.text == "📊 Buyurtmalarim")
 async def msg_orders(message: types.Message):
@@ -298,19 +324,31 @@ async def msg_orders(message: types.Message):
         text += f"🔹 Order ID: {o['id']} | {o['amount']} Stars | {o['status']}\n"
     await message.answer(text, parse_mode="HTML")
 
-@dp.message(F.text == "💵 Pul kiritish")
-async def msg_deposit(message: types.Message):
-    await message.answer("💵 Pul kiritish uchun @devel0per_junior ga murojaat qiling.")
+@dp.message(F.text == "💳 Hisobim")
+async def msg_balance(message: types.Message):
+    user_id = str(message.from_user.id)
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT balance, stars_balance FROM users WHERE id = ?", (user_id,))
+    res = cursor.fetchone()
+    conn.close()
+    
+    balance, stars = res['balance'], res['stars_balance']
+    text = (
+        f"💰 <b>Sizning balansingiz:</b>\n\n"
+        f"💵 Asosiy Hisob: <b>{balance} so'm</b>\n"
+        f"💎 Stars Balansi: <b>{stars}</b>\n\n"
+        f"💳 <b>Hisobni to'ldirish:</b>\n"
+        f"Karta: <code>6262 5702 9537 1109</code>\n\n"
+        f"❗️ To'lovdan so'ng chekni @devc0derweb ga yuboring."
+    )
+    await message.answer(text, parse_mode="HTML")
 
 @dp.callback_query(F.data == "check_sub")
 async def cb_check_sub(callback: types.CallbackQuery):
     if await check_subscription(callback.from_user.id):
         await callback.message.edit_text("✅ Rahmat! Endi botdan foydalanishingiz mumkin.")
-        # Trigger start manually to show main menu
-        # We simulate a new message to call start_cmd
-        new_msg = callback.message
-        new_msg.from_user = callback.from_user
-        await start_cmd(new_msg)
+        await show_main_menu(callback.message, str(callback.from_user.id))
     else:
         await callback.answer("❌ Siz hali ham kanalga a'zo emassiz!", show_alert=True)
 
@@ -341,20 +379,27 @@ async def promo_handler(message: types.Message, state: FSMContext):
         
     cursor.execute("SELECT * FROM promo_usage WHERE user_id = ? AND promo_id = ?", (str(message.from_user.id), promo['id']))
     if cursor.fetchone():
-        await message.answer("❌ Siz bu promo kodni allaqachon ishlatgansiz.")
+        await message.answer("❌ Siz bu promo koddan oldin foydalangansiz!")
         conn.close()
         await state.clear()
         return
         
     # All checks passed, reward the user
     reward = promo['reward']
-    cursor.execute("UPDATE users SET stars_balance = stars_balance + ? WHERE id = ?", (reward, str(message.from_user.id)))
+    cursor.execute("UPDATE users SET stars_balance = stars_balance + ?, total_stars = total_stars + ? WHERE id = ?", (reward, reward, str(message.from_user.id)))
     cursor.execute("UPDATE promo_codes SET current_uses = current_uses + 1 WHERE id = ?", (promo['id'],))
     cursor.execute("INSERT INTO promo_usage (user_id, promo_id) VALUES (?, ?)", (str(message.from_user.id), promo['id']))
+    
+    # Add to orders/history (new)
+    cursor.execute(
+        "INSERT INTO orders (user_id, amount, status) VALUES (?, ?, 'Accepted')",
+        (str(message.from_user.id), f"+{reward} Stars (Promo)")
+    )
+    
     conn.commit()
     conn.close()
     
-    await message.answer(f"✅ Tabriklaymiz! Hisobingizga {reward} Stars 💎 qo'shildi.")
+    await message.answer(f"✅ Tabriklaymiz! Hisobingizga {reward} Stars 💎 qo'shildi va tarixingizga yozildi.", reply_markup=get_main_menu_kb(str(message.from_user.id)))
     await state.clear()
 
 # --- Admin Panel ---
@@ -482,8 +527,7 @@ async def process_balance_amount(message: types.Message, state: FSMContext):
         return
 
     if not amount_str.isdigit():
-        await message.answer("❌ Iltimos, faqat raqam kiriting!", reply_markup=get_admin_back_kb())
-        await state.clear()
+        await message.answer("❌ Iltimos, faqat raqam kiriting (masalan: 10000):", reply_markup=get_cancel_kb())
         return
         
     amount = int(amount_str)
@@ -499,7 +543,7 @@ async def process_balance_amount(message: types.Message, state: FSMContext):
                 await bot.send_message(target_id, f"💰 Hisobingiz {amount} so'mga to'ldirildi!")
             except: pass
         else:
-            await message.answer("❌ Foydalanuvchi topilmadi.", reply_markup=get_admin_back_kb())
+            await message.answer("❌ Foydalanuvchi topilmadi. ID to'g'riligini tekshiring.", reply_markup=get_admin_back_kb())
         conn.close()
     except Exception as e:
         await message.answer(f"❌ Xatolik: {e}", reply_markup=get_admin_back_kb())
@@ -572,8 +616,7 @@ async def process_promo_reward(message: types.Message, state: FSMContext):
         await message.answer("❌ Bekor qilindi.", reply_markup=types.ReplyKeyboardRemove())
         return
     if not message.text.isdigit():
-        await message.answer("❌ Faqat raqam kiriting!", reply_markup=get_admin_back_kb())
-        await state.clear()
+        await message.answer("❌ Miqdorni raqamda kiriting (masalan: 50):", reply_markup=get_cancel_kb())
         return
     await state.update_data(new_promo_reward=int(message.text))
     await message.answer("🔢 Maksimal foydalanish sonini kiriting (masalan: 100):")
@@ -586,8 +629,7 @@ async def process_promo_limit(message: types.Message, state: FSMContext):
         await message.answer("❌ Bekor qilindi.", reply_markup=types.ReplyKeyboardRemove())
         return
     if not message.text.isdigit():
-        await message.answer("❌ Faqat raqam kiriting!", reply_markup=get_admin_back_kb())
-        await state.clear()
+        await message.answer("❌ Limitni raqamda kiriting (masalan: 100):", reply_markup=get_cancel_kb())
         return
     
     data = await state.get_data()
