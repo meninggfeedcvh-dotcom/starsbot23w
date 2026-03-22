@@ -8,8 +8,9 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart, Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.types import WebAppInfo
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
+from aiogram.types import WebAppInfo, ReplyKeyboardMarkup, KeyboardButton
 
 load_dotenv()
 
@@ -130,6 +131,16 @@ def get_join_keyboard():
     kb.button(text="Kanalga a'zo bo'lish 📢", url=f"https://t.me/{REQUIRED_CHANNEL.replace('@', '')}")
     kb.button(text="Tekshirish ✅", callback_data="check_sub")
     kb.adjust(1)
+    return kb.as_markup()
+
+def get_cancel_kb():
+    kb = ReplyKeyboardBuilder()
+    kb.button(text="❌ Bekor qilish")
+    return kb.as_markup(resize_keyboard=True)
+
+def get_admin_back_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🔙 Admin Panelga qaytish", callback_data="admin_main")
     return kb.as_markup()
 
 # --- Handlers ---
@@ -290,6 +301,8 @@ async def promo_handler(message: types.Message, state: FSMContext):
     
     await message.answer(f"✅ Tabriklaymiz! Hisobingizga {reward} Stars 💎 qo'shildi.")
     await state.clear()
+
+# --- Admin Panel ---
 @dp.message(Command("admin"))
 async def admin_panel(message: types.Message):
     if not is_admin(message.from_user.id):
@@ -320,25 +333,38 @@ async def admin_panel(message: types.Message):
     kb.button(text="💰 Balans qo'shish", callback_data="admin_add_balance")
     kb.button(text="👤 Foydalanuvchi ma'lumoti", callback_data="admin_user_info")
     kb.button(text="🎁 Promo kod yaratish", callback_data="admin_create_promo")
-    kb.button(text="📜 Promo kodlar ro'yxat", callback_data="admin_list_promos")
+    kb.button(text="📜 Promo kodlar ro'yxati", callback_data="admin_list_promos")
     kb.adjust(2)
     
     await message.answer(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+
+@dp.callback_query(F.data == "admin_main")
+async def cb_admin_main(callback: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.delete()
+    await admin_panel(callback.message)
+    await callback.answer()
 
 # --- Admin Callback Handlers & FSM ---
 
 @dp.callback_query(F.data == "admin_broadcast")
 async def cb_admin_broadcast(callback: types.CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id): return
-    await callback.message.answer("📣 Hammuaga yuboriladigan xabar matnini yuboring (yoki /cancel):")
+    await callback.message.answer("📣 Hammuaga yuboriladigan xabar matnini yuboring:", reply_markup=get_cancel_kb())
     await state.set_state(AdminStates.waiting_for_broadcast_text)
     await callback.answer()
 
+@dp.message(Command("broadcast"))
+async def cmd_admin_broadcast(message: types.Message, state: FSMContext):
+    if not is_admin(message.from_user.id): return
+    await message.answer("📣 Hammuaga yuboriladigan xabar matnini yuboring:", reply_markup=get_cancel_kb())
+    await state.set_state(AdminStates.waiting_for_broadcast_text)
+
 @dp.message(AdminStates.waiting_for_broadcast_text)
 async def process_broadcast(message: types.Message, state: FSMContext):
-    if message.text == "/cancel":
+    if message.text == "❌ Bekor qilish" or message.text == "/cancel":
         await state.clear()
-        await message.answer("❌ Bekor qilindi.")
+        await message.answer("❌ Bekor qilindi.", reply_markup=types.ReplyKeyboardRemove())
         return
         
     msg_text = message.text
@@ -364,15 +390,21 @@ async def process_broadcast(message: types.Message, state: FSMContext):
 @dp.callback_query(F.data == "admin_add_balance")
 async def cb_admin_balance(callback: types.CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id): return
-    await callback.message.answer("💰 Foydalanuvchi ID sini yuboring (yoki /cancel):")
+    await callback.message.answer("💰 Foydalanuvchi ID sini yuboring:", reply_markup=get_cancel_kb())
     await state.set_state(AdminStates.waiting_for_balance_user_id)
     await callback.answer()
 
+@dp.message(Command("addbalance"))
+async def cmd_admin_balance(message: types.Message, state: FSMContext):
+    if not is_admin(message.from_user.id): return
+    await message.answer("💰 Foydalanuvchi ID sini yuboring:", reply_markup=get_cancel_kb())
+    await state.set_state(AdminStates.waiting_for_balance_user_id)
+
 @dp.message(AdminStates.waiting_for_balance_user_id)
 async def process_balance_id(message: types.Message, state: FSMContext):
-    if message.text == "/cancel":
+    if message.text == "❌ Bekor qilish" or message.text == "/cancel":
         await state.clear()
-        await message.answer("❌ Bekor qilindi.")
+        await message.answer("❌ Bekor qilindi.", reply_markup=types.ReplyKeyboardRemove())
         return
     await state.update_data(target_user_id=message.text.strip())
     await message.answer("💵 Qancha summa qo'shmoqchisiz (so'mda)?")
@@ -380,9 +412,26 @@ async def process_balance_id(message: types.Message, state: FSMContext):
 
 @dp.message(AdminStates.waiting_for_balance_amount)
 async def process_balance_amount(message: types.Message, state: FSMContext):
+    if message.text == "❌ Bekor qilish" or message.text == "/cancel":
+        await state.clear()
+        await message.answer("❌ Bekor qilindi.", reply_markup=types.ReplyKeyboardRemove())
+        return
+        
     data = await state.get_data()
-    target_id = data['target_user_id']
-    amount = message.text.strip()
+    target_id = data.get('target_user_id')
+    amount_str = message.text.strip()
+    
+    if not target_id:
+        await message.answer("❌ Foydalanuvchi ID topilmadi. Qayta urinib ko'ring.", reply_markup=get_admin_back_kb())
+        await state.clear()
+        return
+
+    if not amount_str.isdigit():
+        await message.answer("❌ Iltimos, faqat raqam kiriting!", reply_markup=get_admin_back_kb())
+        await state.clear()
+        return
+        
+    amount = int(amount_str)
     
     try:
         conn = get_db()
@@ -390,26 +439,37 @@ async def process_balance_amount(message: types.Message, state: FSMContext):
         cursor.execute("UPDATE users SET balance = balance + ? WHERE id = ?", (amount, target_id))
         if cursor.rowcount > 0:
             conn.commit()
-            await message.answer(f"✅ Foydalanuvchi {target_id} balansiga {amount} so'm qo'shildi.")
+            await message.answer(f"✅ Foydalanuvchi {target_id} balansiga {amount} so'm qo'shildi.", reply_markup=get_admin_back_kb())
             try:
                 await bot.send_message(target_id, f"💰 Hisobingiz {amount} so'mga to'ldirildi!")
             except: pass
         else:
-            await message.answer("❌ Foydalanuvchi topilmadi.")
+            await message.answer("❌ Foydalanuvchi topilmadi.", reply_markup=get_admin_back_kb())
         conn.close()
     except Exception as e:
-        await message.answer(f"❌ Xatolik: {e}")
+        await message.answer(f"❌ Xatolik: {e}", reply_markup=get_admin_back_kb())
     await state.clear()
 
 @dp.callback_query(F.data == "admin_user_info")
 async def cb_admin_user(callback: types.CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id): return
-    await callback.message.answer("👤 Ma'lumot kerak bo'lgan foydalanuvchi ID sini yuboring:")
+    await callback.message.answer("👤 Foydalanuvchi ID sini yuboring:", reply_markup=get_cancel_kb())
     await state.set_state(AdminStates.waiting_for_user_info_id)
     await callback.answer()
 
+@dp.message(Command("user"))
+async def cmd_admin_user(message: types.Message, state: FSMContext):
+    if not is_admin(message.from_user.id): return
+    await message.answer("👤 Foydalanuvchi ID sini yuboring:", reply_markup=get_cancel_kb())
+    await state.set_state(AdminStates.waiting_for_user_info_id)
+
 @dp.message(AdminStates.waiting_for_user_info_id)
 async def process_user_info(message: types.Message, state: FSMContext):
+    if message.text == "❌ Bekor qilish" or message.text == "/cancel":
+        await state.clear()
+        await message.answer("❌ Bekor qilindi.", reply_markup=types.ReplyKeyboardRemove())
+        return
+        
     target_id = message.text.strip()
     conn = get_db()
     cursor = conn.cursor()
@@ -419,16 +479,16 @@ async def process_user_info(message: types.Message, state: FSMContext):
     
     if user:
         text = (
-            f"👤 <b>Foydalanuvchi:</b> @{user['username']}\n"
+            f"👤 <b>Foydalanuvchi:</b> @{user['username'] if user['username'] else 'Noma\'lum'}\n"
             f"🆔 ID: <code>{user['id']}</code>\n"
             f"💰 Balans: {user['balance']} so'm\n"
             f"💎 Stars Balans: {user['stars_balance']}\n"
             f"📦 Buyurtmalar: {user['total_orders']}\n"
             f"📅 Qo'shilgan: {user['joined_at']}"
         )
-        await message.answer(text, parse_mode="HTML")
+        await message.answer(text, reply_markup=get_admin_back_kb(), parse_mode="HTML")
     else:
-        await message.answer("❌ Foydalanuvchi topilmadi.")
+        await message.answer("❌ Foydalanuvchi topilmadi.", reply_markup=get_admin_back_kb())
     await state.clear()
 
 # --- Admin Promo Management ---
@@ -436,15 +496,15 @@ async def process_user_info(message: types.Message, state: FSMContext):
 @dp.callback_query(F.data == "admin_create_promo")
 async def cb_create_promo(callback: types.CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id): return
-    await callback.message.answer("🎁 Yangi promo kodni yuboring (masalan: NEW2024):")
+    await callback.message.answer("🎁 Yangi promo kodni yuboring (masalan: NEW2024):", reply_markup=get_cancel_kb())
     await state.set_state(AdminStates.waiting_for_promo_code)
     await callback.answer()
 
 @dp.message(AdminStates.waiting_for_promo_code)
 async def process_promo_code(message: types.Message, state: FSMContext):
-    if message.text == "/cancel":
+    if message.text == "❌ Bekor qilish" or message.text == "/cancel":
         await state.clear()
-        await message.answer("❌ Bekor qilindi.")
+        await message.answer("❌ Bekor qilindi.", reply_markup=types.ReplyKeyboardRemove())
         return
     await state.update_data(new_promo_code=message.text.strip().upper())
     await message.answer("💰 Ushbu promo kod uchun qancha Stars 💎 berilsin?")
@@ -452,8 +512,13 @@ async def process_promo_code(message: types.Message, state: FSMContext):
 
 @dp.message(AdminStates.waiting_for_promo_reward)
 async def process_promo_reward(message: types.Message, state: FSMContext):
+    if message.text == "❌ Bekor qilish" or message.text == "/cancel":
+        await state.clear()
+        await message.answer("❌ Bekor qilindi.", reply_markup=types.ReplyKeyboardRemove())
+        return
     if not message.text.isdigit():
-        await message.answer("❌ Faqat raqam kiriting!")
+        await message.answer("❌ Faqat raqam kiriting!", reply_markup=get_admin_back_kb())
+        await state.clear()
         return
     await state.update_data(new_promo_reward=int(message.text))
     await message.answer("🔢 Maksimal foydalanish sonini kiriting (masalan: 100):")
@@ -461,8 +526,13 @@ async def process_promo_reward(message: types.Message, state: FSMContext):
 
 @dp.message(AdminStates.waiting_for_promo_limit)
 async def process_promo_limit(message: types.Message, state: FSMContext):
+    if message.text == "❌ Bekor qilish" or message.text == "/cancel":
+        await state.clear()
+        await message.answer("❌ Bekor qilindi.", reply_markup=types.ReplyKeyboardRemove())
+        return
     if not message.text.isdigit():
-        await message.answer("❌ Faqat raqam kiriting!")
+        await message.answer("❌ Faqat raqam kiriting!", reply_markup=get_admin_back_kb())
+        await state.clear()
         return
     
     data = await state.get_data()
@@ -479,11 +549,11 @@ async def process_promo_limit(message: types.Message, state: FSMContext):
         )
         conn.commit()
         conn.close()
-        await message.answer(f"✅ Promo kod yaratildi!\n\n🎫 Kod: <b>{code}</b>\n💎 Sovg'a: {reward} Stars\n🔢 Limit: {limit} ta", parse_mode="HTML")
+        await message.answer(f"✅ Promo kod yaratildi!\n\n🎫 Kod: <b>{code}</b>\n💎 Sovg'a: {reward} Stars\n🔢 Limit: {limit} ta", reply_markup=get_admin_back_kb(), parse_mode="HTML")
     except sqlite3.IntegrityError:
-        await message.answer("❌ Boshqa promo kod tanlang, bu kod allaqachon mavjud.")
+        await message.answer("❌ Boshqa promo kod tanlang, bu kod allaqachon mavjud.", reply_markup=get_admin_back_kb())
     except Exception as e:
-        await message.answer(f"❌ Xatolik: {e}")
+        await message.answer(f"❌ Xatolik: {e}", reply_markup=get_admin_back_kb())
     
     await state.clear()
 
@@ -498,7 +568,7 @@ async def cb_list_promos(callback: types.CallbackQuery):
     conn.close()
     
     if not promos:
-        await callback.message.answer("📭 Hozircha promo kodlar yo'q.")
+        await callback.message.answer("📭 Hozircha promo kodlar yo'q.", reply_markup=get_admin_back_kb())
         await callback.answer()
         return
         
@@ -506,7 +576,7 @@ async def cb_list_promos(callback: types.CallbackQuery):
     for p in promos:
         text += f"🎫 <code>{p['code']}</code> | 💎 {p['reward']} | 🔢 {p['current_uses']}/{p['max_uses']}\n"
     
-    await callback.message.answer(text, parse_mode="HTML")
+    await callback.message.answer(text, reply_markup=get_admin_back_kb(), parse_mode="HTML")
     await callback.answer()
 
 @dp.message(Command("cancel"))
