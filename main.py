@@ -100,6 +100,32 @@ def setup_db():
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
+    # Services table (Dynamic)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS services (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT,
+            type TEXT,
+            val INTEGER,
+            price INTEGER
+        )
+    """)
+    
+    # Check and populate services if empty
+    cursor.execute("SELECT COUNT(*) FROM services")
+    if cursor.fetchone()[0] == 0:
+        initial_services = [
+            ("💎 50 Stars", "stars", 50, 10500),
+            ("💎 100 Stars", "stars", 100, 21000),
+            ("💎 200 Stars", "stars", 200, 42000),
+            ("💎 400 Stars", "stars", 400, 84000),
+            ("💎 1000 Stars", "stars", 1000, 210000),
+            ("👑 Premium 3 oy", "premium", 3, 190000),
+            ("👑 Premium 6 oy", "premium", 6, 350000),
+            ("👑 Premium 12 oy", "premium", 12, 600000)
+        ]
+        cursor.executemany("INSERT INTO services (name, type, val, price) VALUES (?, ?, ?, ?)", initial_services)
     
     conn.commit()
     conn.close()
@@ -299,9 +325,21 @@ async def msg_support(message: types.Message):
 
 @dp.message(F.text == "📦 Xizmatlar")
 async def msg_services(message: types.Message):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM services")
+    services = cursor.fetchall()
+    conn.close()
+    
+    if not services:
+        await message.answer("📦 Hozircha xizmatlar topilmadi.")
+        return
+        
     kb = InlineKeyboardBuilder()
-    kb.button(text="💎 Stars olish", web_app=WebAppInfo(url=f"https://ishla-production.up.railway.app/?tab=stars&user_id={message.from_user.id}"))
-    kb.button(text="👑 Premium olish", web_app=WebAppInfo(url=f"https://ishla-production.up.railway.app/?tab=premium&user_id={message.from_user.id}"))
+    for s in services:
+        # Use web_app to open the specific package in the shop
+        url = f"https://ishla-production.up.railway.app/?tab={s['type']}&val={s['val']}&user_id={message.from_user.id}"
+        kb.button(text=f"{s['name']} - {s['price']} so'm", web_app=WebAppInfo(url=url))
     kb.adjust(1)
     await message.answer("📦 Kerakli xizmatni tanlang:", reply_markup=kb.as_markup())
 
