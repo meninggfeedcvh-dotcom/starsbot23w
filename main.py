@@ -175,6 +175,36 @@ async def start_cmd(message: types.Message):
             except: pass
         
         conn.commit()
+    
+    # Handle Auto-Promo from start args (/start promo_NEWYEAR)
+    if referred_by and referred_by.startswith("promo_"):
+        promo_code = referred_by.replace("promo_", "").upper()
+        
+        # 1. Check if promo exists and is valid
+        cursor.execute("SELECT * FROM promo_codes WHERE code = ?", (promo_code,))
+        promo = cursor.fetchone()
+        
+        if promo:
+            if promo['current_uses'] < promo['max_uses']:
+                # 2. Check if user already used this promo
+                cursor.execute("SELECT user_id FROM promo_usage WHERE user_id = ? AND promo_id = ?", (user_id, promo['id']))
+                already_used = cursor.fetchone()
+                
+                if not already_used:
+                    # 3. Apply Promo
+                    reward = promo['reward']
+                    cursor.execute("UPDATE users SET stars_balance = stars_balance + ? WHERE id = ?", (reward, user_id))
+                    cursor.execute("UPDATE promo_codes SET current_uses = current_uses + 1 WHERE id = ?", (promo['id'],))
+                    cursor.execute("INSERT INTO promo_usage (user_id, promo_id) VALUES (?, ?)", (user_id, promo['id']))
+                    conn.commit()
+                    await message.answer(f"🎁 <b>Tabriklaymiz!</b>\n\nHavola orqali kelganingiz uchun <b>{reward} Stars</b> 💎 balansigizga qo'shildi!", parse_mode="HTML")
+                else:
+                    await message.answer("⚠️ Siz ushbu promo kodni allaqachon ishlatgansiz.")
+            else:
+                await message.answer("😔 Afsuski, bu promo kodning limiti tugagan.")
+        else:
+            await message.answer("❌ Noto'g'ri promo kod havolasi.")
+
     # Check Subscription
     if not await check_subscription(message.from_user.id):
         await message.answer(
@@ -184,13 +214,6 @@ async def start_cmd(message: types.Message):
         return
 
     # Web App Button
-    kb = InlineKeyboardBuilder()
-    kb.button(text="Web Appni ochish 🚀", web_app=WebAppInfo(url=f"https://buyurtma-production.up.railway.app/?user_id={user_id}")) # LOCAL TESTING: http://localhost:3000
-    kb.button(text="Balans 💰", callback_data="check_balance")
-    kb.button(text="Referal Havola 👥", callback_data="get_ref")
-    kb.button(text="Promo Kod 🎁", callback_data="enter_promo")
-    kb.adjust(1, 2)
-
     await message.answer(
         f"<b>Salom {message.from_user.full_name}!</b> 👋\n\n"
         "✨ <b>STARS BAZA</b> botiga xush kelibsiz!\n\n"
@@ -199,9 +222,68 @@ async def start_cmd(message: types.Message):
         "👑 <b>Telegram Premium</b> - Tezkor va ishonchli\n"
         "💰 <b>Referal tizimi</b> - Har bir do'st uchun pul ishlang\n\n"
         "Pastdagi tugma orqali <b>Web App</b>ni oching va xaridni boshlang!",
-        reply_markup=kb.as_markup(),
+        reply_markup=get_main_menu_kb(user_id),
         parse_mode="HTML"
     )
+
+@dp.message(F.text == "💳 Hisobim")
+async def msg_check_balance(message: types.Message):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT balance, stars_balance FROM users WHERE id = ?", (str(message.from_user.id),))
+    res = cursor.fetchone()
+    conn.close()
+    
+    if res:
+        balance, stars = res['balance'], res['stars_balance']
+        formatted_balance = "{:,}".format(balance).replace(",", " ")
+        await message.answer(
+            f"<b>💳 Sizning balansingiz:</b>\n\n"
+            f"💰 Asosiy: <b>{formatted_balance} so'm</b>\n"
+            f"💎 Stars: <b>{stars} ta</b>",
+            parse_mode="HTML"
+        )
+
+@dp.message(F.text == "💰 Pul yig'ish")
+async def msg_get_ref(message: types.Message):
+    user_id = str(message.from_user.id)
+    bot_username = (await bot.get_me()).username
+    ref_link = f"https://t.me/{bot_username}?start={user_id}"
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM users WHERE referred_by = ?", (user_id,))
+    count = cursor.fetchone()[0]
+    conn.close()
+
+    await message.answer(
+        f"💎 <b>Referal tizimi</b>\n\n"
+        f"Do'stingizni taklif qiling va har biriga +1 Star 💎 oling!\n\n"
+        f"🔗 Sizning havolangiz:\n<code>{ref_link}</code>\n\n"
+        f"👥 Hammasi bo'lib: <b>{count} ta</b> referal",
+        parse_mode="HTML"
+    )
+
+@dp.message(F.text == "🎁 Promo Kod")
+async def msg_enter_promo(message: types.Message, state: FSMContext):
+    await message.answer("🎁 Promo kodni yuboring (yoki /cancel):", reply_markup=get_cancel_kb())
+    await state.set_state(UserStates.entering_promo)
+
+@dp.message(F.text == "☎️ Qo'llab-quvvatlash")
+async def msg_support(message: types.Message):
+    await message.answer("👨‍💻 Qo'llab-quvvatlash: @devel0per_junior\nSavollaringiz bo'lsa yoziing!")
+
+@dp.message(F.text == "📦 Xizmatlar")
+async def msg_services(message: types.Message):
+    await message.answer("📦 Xizmatlar tez kunda qo'shiladi!")
+
+@dp.message(F.text == "📊 Buyurtmalarim")
+async def msg_orders(message: types.Message):
+    await message.answer("📊 Sizning buyurtmalaringiz hozircha yo'q.")
+
+@dp.message(F.text == "💵 Pul kiritish")
+async def msg_deposit(message: types.Message):
+    await message.answer("💵 Pul kiritish uchun @devel0per_junior ga murojaat qiling.")
 
 @dp.callback_query(F.data == "check_balance")
 async def check_balance(callback: types.CallbackQuery):
@@ -555,14 +637,30 @@ async def process_promo_limit(message: types.Message, state: FSMContext):
         
         # Post to the channel
         try:
+            bot_me = await bot.get_me()
+            # Deep link to open the bot and potentially handle the code (though we just link for now)
+            bot_link = f"https://t.me/{bot_me.username}?start=promo_{code}"
+            
             channel_text = (
                 "🎁 <b>Yangi Promo Kod!</b>\n\n"
                 f"🎫 Kod: <code>{code}</code>\n"
                 f"💎 Sovg'a: <b>{reward} Stars</b>\n"
                 f"🔢 Limit: <b>{limit} ta</b> foydalanuvchi uchun!\n\n"
-                "🏃‍♂️ Shoshiling! Botga kiring va promo kodni ishlating!"
+                "🏃‍♂️ Shoshiling! Pastdagi tugmani bosing va kodni ishlating!"
             )
-            await bot.send_message(chat_id=REQUIRED_CHANNEL, text=channel_text, parse_mode="HTML")
+            
+            chan_kb = InlineKeyboardBuilder()
+            chan_kb.button(
+                text="Botga kirish va ishlatish 🚀", 
+                url=bot_link
+            )
+            
+            await bot.send_message(
+                chat_id=REQUIRED_CHANNEL, 
+                text=channel_text, 
+                reply_markup=chan_kb.as_markup(),
+                parse_mode="HTML"
+            )
         except Exception as e:
             logging.error(f"Failed to post promo to channel: {e}")
             await message.answer("⚠️ Eslatma: Promo kod yaratildi, lekin kanalga yuborishda xatolik yuz berdi (Bot kanalda admin ekanligini tekshiring).")
