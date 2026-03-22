@@ -422,6 +422,68 @@ async def process_user_info(message: types.Message, state: FSMContext):
             f"👤 <b>Foydalanuvchi:</b> @{user['username']}\n"
             f"🆔 ID: <code>{user['id']}</code>\n"
             f"💰 Balans: {user['balance']} so'm\n"
+            f"💎 Stars Balans: {user['stars_balance']}\n"
+            f"📦 Buyurtmalar: {user['total_orders']}\n"
+            f"📅 Qo'shilgan: {user['joined_at']}"
+        )
+        await message.answer(text, parse_mode="HTML")
+    else:
+        await message.answer("❌ Foydalanuvchi topilmadi.")
+    await state.clear()
+
+# --- Admin Promo Management ---
+
+@dp.callback_query(F.data == "admin_create_promo")
+async def cb_create_promo(callback: types.CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id): return
+    await callback.message.answer("🎁 Yangi promo kodni yuboring (masalan: NEW2024):")
+    await state.set_state(AdminStates.waiting_for_promo_code)
+    await callback.answer()
+
+@dp.message(AdminStates.waiting_for_promo_code)
+async def process_promo_code(message: types.Message, state: FSMContext):
+    if message.text == "/cancel":
+        await state.clear()
+        await message.answer("❌ Bekor qilindi.")
+        return
+    await state.update_data(new_promo_code=message.text.strip().upper())
+    await message.answer("💰 Ushbu promo kod uchun qancha Stars 💎 berilsin?")
+    await state.set_state(AdminStates.waiting_for_promo_reward)
+
+@dp.message(AdminStates.waiting_for_promo_reward)
+async def process_promo_reward(message: types.Message, state: FSMContext):
+    if not message.text.isdigit():
+        await message.answer("❌ Faqat raqam kiriting!")
+        return
+    await state.update_data(new_promo_reward=int(message.text))
+    await message.answer("🔢 Maksimal foydalanish sonini kiriting (masalan: 100):")
+    await state.set_state(AdminStates.waiting_for_promo_limit)
+
+@dp.message(AdminStates.waiting_for_promo_limit)
+async def process_promo_limit(message: types.Message, state: FSMContext):
+    if not message.text.isdigit():
+        await message.answer("❌ Faqat raqam kiriting!")
+        return
+    
+    data = await state.get_data()
+    code = data['new_promo_code']
+    reward = data['new_promo_reward']
+    limit = int(message.text)
+    
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO promo_codes (code, reward, max_uses, current_uses) VALUES (?, ?, ?, 0)",
+            (code, reward, limit)
+        )
+        conn.commit()
+        conn.close()
+        await message.answer(f"✅ Promo kod yaratildi!\n\n🎫 Kod: <b>{code}</b>\n💎 Sovg'a: {reward} Stars\n🔢 Limit: {limit} ta", parse_mode="HTML")
+    except sqlite3.IntegrityError:
+        await message.answer("❌ Boshqa promo kod tanlang, bu kod allaqachon mavjud.")
+    except Exception as e:
+        await message.answer(f"❌ Xatolik: {e}")
     
     await state.clear()
 
