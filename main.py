@@ -1,9 +1,14 @@
 import os
 import psycopg2
+from psycopg2 import pool
 from psycopg2.extras import DictCursor
 import logging
 import asyncio
 from dotenv import load_dotenv
+
+env_path = os.path.join(os.path.dirname(__file__), '..', '.env')
+load_dotenv(dotenv_path=env_path)
+
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart, Command, StateFilter
@@ -45,6 +50,37 @@ def is_admin(user_id: int):
     return str(user_id) in [id.strip() for id in ADMIN_IDS if id.strip()]
 
 # --- Database Helpers ---
+db_pool = None
+
+def init_pool():
+    global db_pool
+    if not db_pool:
+        db_pool = psycopg2.pool.ThreadedConnectionPool(1, 20, DB_URL)
+
+async def fetch_query(sql, params=None, fetch_all=False):
+    def _fetch():
+        conn = db_pool.getconn()
+        try:
+            conn.autocommit = True
+            with conn.cursor(cursor_factory=DictCursor) as cursor:
+                cursor.execute(sql, params)
+                return cursor.fetchall() if fetch_all else cursor.fetchone()
+        finally:
+            db_pool.putconn(conn)
+    return await asyncio.to_thread(_fetch)
+
+async def execute_query(sql, params=None):
+    def _exec():
+        conn = db_pool.getconn()
+        try:
+            conn.autocommit = True
+            with conn.cursor(cursor_factory=DictCursor) as cursor:
+                cursor.execute(sql, params)
+                return cursor.rowcount
+        finally:
+            db_pool.putconn(conn)
+    return await asyncio.to_thread(_exec)
+
 def get_db():
     conn = psycopg2.connect(DB_URL)
     conn.autocommit = True
@@ -208,57 +244,48 @@ async def start_cmd(message: types.Message):
     args = message.text.split()
     referred_by = args[1] if len(args) > 1 else None
 
-    conn = get_db()
-    cursor = conn.cursor(cursor_factory=DictCursor)
-    
     # 1. Check if user exists
-    cursor.execute("SELECT id FROM users WHERE id = %s", (user_id,))
-    exists = cursor.fetchone()
+    exists = await fetch_query("SELECT id FROM users WHERE id = %s", (user_id,))
     
     if not exists:
         # 2. Add new user
-        cursor.execute(
+        await execute_query(
             "INSERT INTO users (id, username, balance, total_orders, total_stars, joined_at, referred_by, stars_balance) VALUES (%s, %s, 0, 0, 0, %s, %s, 0)",
             (user_id, username, datetime.now(), referred_by)
         )
         
         # 3. Reward referrer (+1 Star)
         if referred_by and referred_by != user_id:
-            cursor.execute("UPDATE users SET stars_balance = stars_balance + 1 WHERE id = %s", (referred_by,))
+            await execute_query("UPDATE users SET stars_balance = stars_balance + 1 WHERE id = %s", (referred_by,))
             try:
                 await bot.send_message(referred_by, f"🎉 Yangi referal! Sizga +1 Star 💎 berildi.")
             except: pass
-        
-        conn.commit()
     
     # Handle Auto-Promo from start args (/start promo_NEWYEAR)
     if referred_by and referred_by.startswith("promo_"):
         promo_code = referred_by.replace("promo_", "").upper()
         
         # 1. Check if promo exists and is valid
-        cursor.execute("SELECT * FROM promo_codes WHERE code = %s", (promo_code,))
-        promo = cursor.fetchone()
+        promo = await fetch_query("SELECT * FROM promo_codes WHERE code = %s", (promo_code,))
         
         if promo:
             if promo['current_uses'] < promo['max_uses']:
                 # 2. Check if user already used this promo
-                cursor.execute("SELECT user_id FROM promo_usage WHERE user_id = %s AND promo_id = %s", (user_id, promo['id']))
-                already_used = cursor.fetchone()
+                already_used = await fetch_query("SELECT user_id FROM promo_usage WHERE user_id = %s AND promo_id = %s", (user_id, promo['id']))
                 
                 if not already_used:
                     # 3. Apply Promo
                     reward = promo['reward']
-                    cursor.execute("UPDATE users SET stars_balance = stars_balance + %s WHERE id = %s", (reward, user_id))
-                    cursor.execute("UPDATE promo_codes SET current_uses = current_uses + 1 WHERE id = %s", (promo['id'],))
-                    cursor.execute("INSERT INTO promo_usage (user_id, promo_id) VALUES (%s, %s)", (user_id, promo['id']))
+                    await execute_query("UPDATE users SET stars_balance = stars_balance + %s WHERE id = %s", (reward, user_id))
+                    await execute_query("UPDATE promo_codes SET current_uses = current_uses + 1 WHERE id = %s", (promo['id'],))
+                    await execute_query("INSERT INTO promo_usage (user_id, promo_id) VALUES (%s, %s)", (user_id, promo['id']))
                     
                     # Add to orders/history (new)
-                    cursor.execute(
+                    await execute_query(
                         "INSERT INTO orders (user_id, amount, status) VALUES (%s, %s, 'Accepted')",
                         (user_id, f"+{reward} Stars (Auto-Promo)")
                     )
                     
-                    conn.commit()
                     await message.answer(f"🎁 <b>Tabriklaymiz!</b>\n\nHavola orqali kelganingiz uchun <b>{reward} Stars</b> 💎 balansigizga qo'shildi!", parse_mode="HTML")
                 else:
                     await message.answer("⚠️ Siz ushbu promo kodni allaqachon ishlatgansiz.")
@@ -279,11 +306,7 @@ async def start_cmd(message: types.Message):
 
 @dp.message(F.text == "💳 Hisobim")
 async def msg_check_balance(message: types.Message):
-    conn = get_db()
-    cursor = conn.cursor(cursor_factory=DictCursor)
-    cursor.execute("SELECT balance, stars_balance FROM users WHERE id = %s", (str(message.from_user.id),))
-    res = cursor.fetchone()
-    conn.close()
+    res = await fetch_query("SELECT balance, stars_balance FROM users WHERE id = %s", (str(message.from_user.id),))
     
     if res:
         balance, stars = res['balance'], res['stars_balance']
@@ -301,11 +324,8 @@ async def msg_get_ref(message: types.Message):
     bot_username = (await bot.get_me()).username
     ref_link = f"https://t.me/{bot_username}?start={user_id}"
     
-    conn = get_db()
-    cursor = conn.cursor(cursor_factory=DictCursor)
-    cursor.execute("SELECT COUNT(*) FROM users WHERE referred_by = %s", (user_id,))
-    count = cursor.fetchone()[0]
-    conn.close()
+    row = await fetch_query("SELECT COUNT(*) as count FROM users WHERE referred_by = %s", (user_id,))
+    count = row['count'] if row else 0
 
     await message.answer(
         f"💎 <b>Referal tizimi</b>\n\n"
@@ -326,11 +346,7 @@ async def msg_support(message: types.Message):
 
 @dp.message(F.text == "📦 Xizmatlar")
 async def msg_services(message: types.Message):
-    conn = get_db()
-    cursor = conn.cursor(cursor_factory=DictCursor)
-    cursor.execute("SELECT * FROM services")
-    services = cursor.fetchall()
-    conn.close()
+    services = await fetch_query("SELECT * FROM services", fetch_all=True)
     
     if not services:
         await message.answer("📦 Hozircha xizmatlar topilmadi.")
@@ -349,11 +365,7 @@ async def msg_services(message: types.Message):
 async def msg_orders(message: types.Message):
     # Retrieve orders from DB
     user_id = str(message.from_user.id)
-    conn = get_db()
-    cursor = conn.cursor(cursor_factory=DictCursor)
-    cursor.execute("SELECT * FROM orders WHERE user_id = %s ORDER BY id DESC LIMIT 5", (user_id,))
-    orders = cursor.fetchall()
-    conn.close()
+    orders = await fetch_query("SELECT * FROM orders WHERE user_id = %s ORDER BY id DESC LIMIT 5", (user_id,), fetch_all=True)
     
     if not orders:
         await message.answer("📊 Sizning buyurtmalaringiz hozircha yo'q.")
@@ -364,14 +376,10 @@ async def msg_orders(message: types.Message):
         text += f"🔹 Order ID: {o['id']} | {o['amount']} Stars | {o['status']}\n"
     await message.answer(text, parse_mode="HTML")
 
-@dp.message(F.text == "💳 Hisobim")
-async def msg_balance(message: types.Message):
+@dp.message(F.text == "💵 Pul kiritish")
+async def msg_deposit(message: types.Message):
     user_id = str(message.from_user.id)
-    conn = get_db()
-    cursor = conn.cursor(cursor_factory=DictCursor)
-    cursor.execute("SELECT balance, stars_balance FROM users WHERE id = %s", (user_id,))
-    res = cursor.fetchone()
-    conn.close()
+    res = await fetch_query("SELECT balance, stars_balance FROM users WHERE id = %s", (user_id,))
     
     balance, stars = res['balance'], res['stars_balance']
     text = (
@@ -401,43 +409,34 @@ async def promo_handler(message: types.Message, state: FSMContext):
         return
         
     code = message.text.strip().upper()
-    conn = get_db()
-    cursor = conn.cursor(cursor_factory=DictCursor)
-    cursor.execute("SELECT * FROM promo_codes WHERE code = %s", (code,))
-    promo = cursor.fetchone()
+    promo = await fetch_query("SELECT * FROM promo_codes WHERE code = %s", (code,))
     
     if not promo:
         await message.answer("❌ Bunday promo kod mavjud emas.")
-        conn.close()
         return
         
     if promo['current_uses'] >= promo['max_uses']:
         await message.answer("❌ Bu promo kodning ishlatilish soni tugagan.")
-        conn.close()
         await state.clear()
         return
         
-    cursor.execute("SELECT * FROM promo_usage WHERE user_id = %s AND promo_id = %s", (str(message.from_user.id), promo['id']))
-    if cursor.fetchone():
+    already_used = await fetch_query("SELECT * FROM promo_usage WHERE user_id = %s AND promo_id = %s", (str(message.from_user.id), promo['id']))
+    if already_used:
         await message.answer("❌ Siz bu promo koddan oldin foydalangansiz!")
-        conn.close()
         await state.clear()
         return
         
     # All checks passed, reward the user
     reward = promo['reward']
-    cursor.execute("UPDATE users SET stars_balance = stars_balance + %s, total_stars = total_stars + %s WHERE id = %s", (reward, reward, str(message.from_user.id)))
-    cursor.execute("UPDATE promo_codes SET current_uses = current_uses + 1 WHERE id = %s", (promo['id'],))
-    cursor.execute("INSERT INTO promo_usage (user_id, promo_id) VALUES (%s, %s)", (str(message.from_user.id), promo['id']))
+    await execute_query("UPDATE users SET stars_balance = stars_balance + %s, total_stars = total_stars + %s WHERE id = %s", (reward, reward, str(message.from_user.id)))
+    await execute_query("UPDATE promo_codes SET current_uses = current_uses + 1 WHERE id = %s", (promo['id'],))
+    await execute_query("INSERT INTO promo_usage (user_id, promo_id) VALUES (%s, %s)", (str(message.from_user.id), promo['id']))
     
     # Add to orders/history (new)
-    cursor.execute(
+    await execute_query(
         "INSERT INTO orders (user_id, amount, status) VALUES (%s, %s, 'Accepted')",
         (str(message.from_user.id), f"+{reward} Stars (Promo)")
     )
-    
-    conn.commit()
-    conn.close()
     
     await message.answer(f"✅ Tabriklaymiz! Hisobingizga {reward} Stars 💎 qo'shildi va tarixingizga yozildi.", reply_markup=get_main_menu_kb(str(message.from_user.id)))
     await state.clear()
@@ -449,17 +448,14 @@ async def admin_panel(message: types.Message):
         await message.answer("❌ Sizda ushbu komanda uchun ruxsat yo'q.")
         return
     
-    conn = get_db()
-    cursor = conn.cursor(cursor_factory=DictCursor)
-    cursor.execute("SELECT COUNT(*) FROM users")
-    total_users = cursor.fetchone()[0]
+    row1 = await fetch_query("SELECT COUNT(*) as count FROM users")
+    total_users = row1['count'] if row1 else 0
     
-    cursor.execute("SELECT SUM(total_stars) FROM users")
-    total_stars_val = cursor.fetchone()[0] or 0
+    row2 = await fetch_query("SELECT SUM(total_stars) as sum FROM users")
+    total_stars_val = row2['sum'] if row2 else 0
     
-    cursor.execute("SELECT COUNT(*) FROM promo_codes")
-    total_promos = cursor.fetchone()[0]
-    conn.close()
+    row3 = await fetch_query("SELECT COUNT(*) as count FROM promo_codes")
+    total_promos = row3['count'] if row3 else 0
 
     text = (
         "<b>👨‍💻 Admin Paneli</b>\n\n"
@@ -508,11 +504,7 @@ async def process_broadcast(message: types.Message, state: FSMContext):
         return
         
     msg_text = message.text
-    conn = get_db()
-    cursor = conn.cursor(cursor_factory=DictCursor)
-    cursor.execute("SELECT id FROM users")
-    users = cursor.fetchall()
-    conn.close()
+    users = await fetch_query("SELECT id FROM users", fetch_all=True)
 
     count = 0
     progress = await message.answer(f"⏳ {len(users)} ta foydalanuvchiga yuborish boshlandi...")
@@ -573,18 +565,14 @@ async def process_balance_amount(message: types.Message, state: FSMContext):
     amount = int(amount_str)
     
     try:
-        conn = get_db()
-        cursor = conn.cursor(cursor_factory=DictCursor)
-        cursor.execute("UPDATE users SET balance = balance + %s WHERE id = %s", (amount, target_id))
-        if cursor.rowcount > 0:
-            conn.commit()
+        rowcount = await execute_query("UPDATE users SET balance = balance + %s WHERE id = %s", (amount, target_id))
+        if rowcount > 0:
             await message.answer(f"✅ Foydalanuvchi {target_id} balansiga {amount} so'm qo'shildi.", reply_markup=get_admin_back_kb())
             try:
                 await bot.send_message(target_id, f"💰 Hisobingiz {amount} so'mga to'ldirildi!")
             except: pass
         else:
             await message.answer("❌ Foydalanuvchi topilmadi. ID to'g'riligini tekshiring.", reply_markup=get_admin_back_kb())
-        conn.close()
     except Exception as e:
         await message.answer(f"❌ Xatolik: {e}", reply_markup=get_admin_back_kb())
     await state.clear()
@@ -610,11 +598,7 @@ async def process_user_info(message: types.Message, state: FSMContext):
         return
         
     target_id = message.text.strip()
-    conn = get_db()
-    cursor = conn.cursor(cursor_factory=DictCursor)
-    cursor.execute("SELECT * FROM users WHERE id = %s", (target_id,))
-    user = cursor.fetchone()
-    conn.close()
+    user = await fetch_query("SELECT * FROM users WHERE id = %s", (target_id,))
     
     if user:
         text = (
@@ -678,14 +662,10 @@ async def process_promo_limit(message: types.Message, state: FSMContext):
     limit = int(message.text)
     
     try:
-        conn = get_db()
-        cursor = conn.cursor(cursor_factory=DictCursor)
-        cursor.execute(
+        await execute_query(
             "INSERT INTO promo_codes (code, reward, max_uses, current_uses) VALUES (%s, %s, %s, 0)",
             (code, reward, limit)
         )
-        conn.commit()
-        conn.close()
         
         # Notify the admin
         await message.answer(f"✅ Promo kod yaratildi!\n\n🎫 Kod: <b>{code}</b>\n💎 Sovg'a: {reward} Stars\n🔢 Limit: {limit} ta", reply_markup=get_admin_back_kb(), parse_mode="HTML")
@@ -730,11 +710,7 @@ async def process_promo_limit(message: types.Message, state: FSMContext):
 async def cb_list_promos(callback: types.CallbackQuery):
     if not is_admin(callback.from_user.id): return
     
-    conn = get_db()
-    cursor = conn.cursor(cursor_factory=DictCursor)
-    cursor.execute("SELECT * FROM promo_codes ORDER BY id DESC LIMIT 20")
-    promos = cursor.fetchall()
-    conn.close()
+    promos = await fetch_query("SELECT * FROM promo_codes ORDER BY id DESC LIMIT 20", fetch_all=True)
     
     if not promos:
         await callback.message.answer("📭 Hozircha promo kodlar yo'q.", reply_markup=get_admin_back_kb())
@@ -755,6 +731,7 @@ async def cancel_handler(message: types.Message, state: FSMContext):
 
 async def main():
     setup_db()
+    init_pool()
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
