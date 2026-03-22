@@ -143,6 +143,19 @@ def get_admin_back_kb():
     kb.button(text="🔙 Admin Panelga qaytish", callback_data="admin_main")
     return kb.as_markup()
 
+def get_main_menu_kb(user_id):
+    kb = ReplyKeyboardBuilder()
+    kb.button(text="🛍️ Onlayn do'kon", web_app=WebAppInfo(url=f"https://buyurtma-production.up.railway.app/?user_id={user_id}"))
+    kb.button(text="📦 Xizmatlar")
+    kb.button(text="📊 Buyurtmalarim")
+    kb.button(text="💳 Hisobim")
+    kb.button(text="💵 Pul kiritish")
+    kb.button(text="💰 Pul yig'ish")
+    kb.button(text="🎁 Promo Kod")
+    kb.button(text="☎️ Qo'llab-quvvatlash")
+    kb.adjust(2)
+    return kb.as_markup(resize_keyboard=True)
+
 # --- Handlers ---
 @dp.message(CommandStart())
 async def start_cmd(message: types.Message):
@@ -213,15 +226,10 @@ async def start_cmd(message: types.Message):
         )
         return
 
-    # Web App Button
     await message.answer(
         f"<b>Salom {message.from_user.full_name}!</b> 👋\n\n"
         "✨ <b>STARS BAZA</b> botiga xush kelibsiz!\n\n"
-        "Bu yerda siz:\n"
-        "💎 <b>Telegram Stars</b> - Eng arzon narxlarda\n"
-        "👑 <b>Telegram Premium</b> - Tezkor va ishonchli\n"
-        "💰 <b>Referal tizimi</b> - Har bir do'st uchun pul ishlang\n\n"
-        "Pastdagi tugma orqali <b>Web App</b>ni oching va xaridni boshlang!",
+        "Pastdagi menyu orqali xizmatlardan foydalanishingiz mumkin.",
         reply_markup=get_main_menu_kb(user_id),
         parse_mode="HTML"
     )
@@ -271,7 +279,7 @@ async def msg_enter_promo(message: types.Message, state: FSMContext):
 
 @dp.message(F.text == "☎️ Qo'llab-quvvatlash")
 async def msg_support(message: types.Message):
-    await message.answer("👨‍💻 Qo'llab-quvvatlash: @devel0per_junior\nSavollaringiz bo'lsa yoziing!")
+    await message.answer("👨‍💻 Qo'llab-quvvatlash: @devel0per_junior\nSavollaringiz bo'lsa yozing!")
 
 @dp.message(F.text == "📦 Xizmatlar")
 async def msg_services(message: types.Message):
@@ -279,77 +287,48 @@ async def msg_services(message: types.Message):
 
 @dp.message(F.text == "📊 Buyurtmalarim")
 async def msg_orders(message: types.Message):
-    await message.answer("📊 Sizning buyurtmalaringiz hozircha yo'q.")
+    # Retrieve orders from DB
+    user_id = str(message.from_user.id)
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM orders WHERE user_id = ? ORDER BY id DESC LIMIT 5", (user_id,))
+    orders = cursor.fetchall()
+    conn.close()
+    
+    if not orders:
+        await message.answer("📊 Sizning buyurtmalaringiz hozircha yo'q.")
+        return
+        
+    text = "<b>📊 Oxirgi 5 ta buyurtmangiz:</b>\n\n"
+    for o in orders:
+        text += f"🔹 Order ID: {o['id']} | {o['amount']} Stars | {o['status']}\n"
+    await message.answer(text, parse_mode="HTML")
 
 @dp.message(F.text == "💵 Pul kiritish")
 async def msg_deposit(message: types.Message):
     await message.answer("💵 Pul kiritish uchun @devel0per_junior ga murojaat qiling.")
 
-@dp.callback_query(F.data == "check_balance")
-async def check_balance(callback: types.CallbackQuery):
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT balance, stars_balance FROM users WHERE id = ?", (str(callback.from_user.id),))
-    res = cursor.fetchone()
-    conn.close()
-    
-    if res:
-        balance, stars = res['balance'], res['stars_balance']
-        formatted_balance = "{:,}".format(balance).replace(",", " ")
-        await callback.message.answer(
-            f"<b>💳 Sizning balansingiz:</b>\n\n"
-            f"💰 Asosiy: <b>{formatted_balance} so'm</b>\n"
-            f"💎 Stars: <b>{stars} ta</b>",
-            parse_mode="HTML"
-        )
-    else:
-        await callback.answer("Foydalanuvchi topilmadi.")
-    await callback.answer()
-
-@dp.callback_query(F.data == "get_ref")
-async def get_ref(callback: types.CallbackQuery):
-    user_id = str(callback.from_user.id)
-    bot_username = (await bot.get_me()).username # Get bot's actual username
-    ref_link = f"https://t.me/{bot_username}?start={user_id}"
-    
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM users WHERE referred_by = ?", (user_id,))
-    count = cursor.fetchone()[0]
-    conn.close()
-
-    await callback.message.answer(
-        f"💎 Referal tizimi\n\n"
-        f"Do'stingizni taklif qiling va har biriga +1 Star 💎 oling!\n\n"
-        f"🔗 Sizning havolangiz: `{ref_link}`\n"
-        f"👥 Hammasi bo'lib: {count} ta referal",
-        parse_mode="Markdown"
-    )
-    await callback.answer()
-
 @dp.callback_query(F.data == "check_sub")
 async def cb_check_sub(callback: types.CallbackQuery):
     if await check_subscription(callback.from_user.id):
         await callback.message.edit_text("✅ Rahmat! Endi botdan foydalanishingiz mumkin.")
-        await start_cmd(callback.message) # Re-run start
+        # Trigger start manually to show main menu
+        # We simulate a new message to call start_cmd
+        new_msg = callback.message
+        new_msg.from_user = callback.from_user
+        await start_cmd(new_msg)
     else:
         await callback.answer("❌ Siz hali ham kanalga a'zo emassiz!", show_alert=True)
-
-@dp.callback_query(F.data == "enter_promo")
-async def cb_promo(callback: types.CallbackQuery, state: FSMContext):
-    await callback.answer()
-    await callback.message.answer("🎁 Promo kodni yuboring (yoki /cancel):")
-    await state.set_state(UserStates.entering_promo)
 
 # --- Promo Handling ---
 @dp.message(UserStates.entering_promo)
 async def promo_handler(message: types.Message, state: FSMContext):
-    if message.text == "/cancel":
+    if message.text == "/cancel" or message.text == "❌ Bekor qilish":
         await state.clear()
-        await message.answer("❌ Bekor qilindi.")
+        await message.answer("❌ Bekor qilindi.", reply_markup=get_main_menu_kb(str(message.from_user.id)))
         return
         
-    code = message.text.strip()
+    code = message.text.strip().upper()
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM promo_codes WHERE code = ?", (code,))
