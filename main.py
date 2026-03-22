@@ -8,7 +8,6 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart, Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.state import State, StatesGroup
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 from aiogram.types import WebAppInfo, ReplyKeyboardMarkup, KeyboardButton
 
@@ -87,28 +86,23 @@ def setup_db():
             PRIMARY KEY (user_id, promo_id)
         )
     """)
+
+    # Orders table (Added to prevent crash)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT,
+            amount INTEGER,
+            status TEXT DEFAULT 'pending',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     
     conn.commit()
     conn.close()
     logging.info("Database setup completed (tables verified/created).")
 
-def init_user(user_id, username, referred_by=None):
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM users WHERE id = ?", (str(user_id),))
-    user = cursor.fetchone()
-    
-    if not user:
-        cursor.execute(
-            "INSERT INTO users (id, username, referred_by, balance, stars_balance) VALUES (?, ?, ?, 0, 0)",
-            (str(user_id), username, referred_by)
-        )
-        if referred_by:
-            # Reward the referrer
-            cursor.execute("UPDATE users SET stars_balance = stars_balance + 1 WHERE id = ?", (referred_by,))
-            # TODO: Send notification to referrer if possible
-        conn.commit()
-    conn.close()
+# Note: init_user is consolidated into start_cmd for monolithic simplicity.
 
 REQUIRED_CHANNEL = "@devel0per_junior" # Updated to match your actual channel
 
