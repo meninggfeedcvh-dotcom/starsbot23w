@@ -93,10 +93,14 @@ def init_user(user_id, username, referred_by=None):
         conn.commit()
     conn.close()
 
-REQUIRED_CHANNEL = "@starsbazachannel"
+REQUIRED_CHANNEL = "@devel0per_junior" # Updated to match your actual channel
 
 # --- Middleware/Helper: Check Channel Subscription ---
 async def check_subscription(user_id: int):
+    # Admins bypass the check
+    if is_admin(user_id):
+        return True
+        
     try:
         member = await bot.get_chat_member(chat_id=REQUIRED_CHANNEL, user_id=user_id)
         if member.status in ["member", "administrator", "creator"]:
@@ -107,7 +111,7 @@ async def check_subscription(user_id: int):
 
 def get_join_keyboard():
     kb = InlineKeyboardBuilder()
-    kb.button(text="Kanalga a'zo bo'lish 📢", url="https://t.me/devel0per_junior")
+    kb.button(text="Kanalga a'zo bo'lish 📢", url=f"https://t.me/{REQUIRED_CHANNEL.replace('@', '')}")
     kb.button(text="Tekshirish ✅", callback_data="check_sub")
     kb.adjust(1)
     return kb.as_markup()
