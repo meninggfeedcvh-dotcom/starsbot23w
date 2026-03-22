@@ -549,7 +549,23 @@ async def process_promo_limit(message: types.Message, state: FSMContext):
         )
         conn.commit()
         conn.close()
+        
+        # Notify the admin
         await message.answer(f"✅ Promo kod yaratildi!\n\n🎫 Kod: <b>{code}</b>\n💎 Sovg'a: {reward} Stars\n🔢 Limit: {limit} ta", reply_markup=get_admin_back_kb(), parse_mode="HTML")
+        
+        # Post to the channel
+        try:
+            channel_text = (
+                "🎁 <b>Yangi Promo Kod!</b>\n\n"
+                f"🎫 Kod: <code>{code}</code>\n"
+                f"💎 Sovg'a: <b>{reward} Stars</b>\n"
+                f"🔢 Limit: <b>{limit} ta</b> foydalanuvchi uchun!\n\n"
+                "🏃‍♂️ Shoshiling! Botga kiring va promo kodni ishlating!"
+            )
+            await bot.send_message(chat_id=REQUIRED_CHANNEL, text=channel_text, parse_mode="HTML")
+        except Exception as e:
+            logging.error(f"Failed to post promo to channel: {e}")
+            await message.answer("⚠️ Eslatma: Promo kod yaratildi, lekin kanalga yuborishda xatolik yuz berdi (Bot kanalda admin ekanligini tekshiring).")
     except sqlite3.IntegrityError:
         await message.answer("❌ Boshqa promo kod tanlang, bu kod allaqachon mavjud.", reply_markup=get_admin_back_kb())
     except Exception as e:
