@@ -17,6 +17,7 @@ load_dotenv()
 # --- Configuration ---
 TOKEN = os.getenv("BOT_TOKEN")
 DB_URL = os.getenv("DATABASE_URL")
+ADMIN_IDS = (os.getenv("ADMIN_IDS") or "").split(",")
 
 class UserStates(StatesGroup):
     entering_promo = State()
