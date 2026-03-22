@@ -15,7 +15,7 @@ load_dotenv()
 
 # --- Configuration ---
 TOKEN = os.getenv("BOT_TOKEN")
-DATABASE = "database.db" # Local to the bot directory
+DATABASE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "database.db")  # Shared DB with web app
 ADMIN_IDS = (os.getenv("ADMIN_IDS") or "").split(",") 
 DB_PATH = os.path.abspath(DATABASE)
 
