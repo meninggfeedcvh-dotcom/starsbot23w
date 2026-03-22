@@ -13,7 +13,7 @@ load_dotenv()
 
 # --- Configuration ---
 TOKEN = os.getenv("BOT_TOKEN")
-DATABASE = "../database.db"
+DATABASE = "database.db" # Local to the bot directory
 ADMIN_IDS = (os.getenv("ADMIN_IDS") or "").split(",") 
 DB_PATH = os.path.abspath(DATABASE)
 
@@ -30,6 +30,50 @@ def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+def setup_db():
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    # Users table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id TEXT PRIMARY KEY,
+            username TEXT,
+            balance INTEGER DEFAULT 0,
+            stars_balance INTEGER DEFAULT 0,
+            total_orders INTEGER DEFAULT 0,
+            total_stars INTEGER DEFAULT 0,
+            joined_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            referred_by TEXT,
+            api_token TEXT
+        )
+    """)
+    
+    # Promo codes table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS promo_codes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT UNIQUE,
+            reward INTEGER,
+            max_uses INTEGER,
+            current_uses INTEGER DEFAULT 0
+        )
+    """)
+    
+    # Promo usage table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS promo_usage (
+            user_id TEXT,
+            promo_id INTEGER,
+            used_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, promo_id)
+        )
+    """)
+    
+    conn.commit()
+    conn.close()
+    logging.info("Database setup completed (tables verified/created).")
 
 def init_user(user_id, username, referred_by=None):
     conn = get_db()
@@ -340,6 +384,7 @@ async def admin_user_info(message: types.Message):
         await message.answer(f"✅ Tabriklaymiz! Hisobingizga {reward} Stars 💎 qo'shildi.")
 
 async def main():
+    setup_db()
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
